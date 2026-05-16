@@ -9,6 +9,7 @@
 import { $ } from "bun";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
+import { randomUUID } from "node:crypto";
 import {
   checkTerminalPromise,
   containsPromiseTag,
@@ -41,7 +42,7 @@ type AgentType = (typeof AGENT_TYPES)[number];
 
 type AgentEnvOptions = { filterPlugins?: boolean; allowAllPermissions?: boolean };
 
-type AgentBuildArgsOptions = { allowAllPermissions?: boolean; extraFlags?: string[]; streamOutput?: boolean };
+type AgentBuildArgsOptions = { allowAllPermissions?: boolean; extraFlags?: string[]; streamOutput?: boolean; sessionId?: string };
 
 interface AgentConfig {
   type: AgentType;
@@ -126,6 +127,7 @@ const ARGS_TEMPLATES: Record<string, (prompt: string, model: string, options?: A
     if (options?.streamOutput) cmdArgs.push("--output-format", "stream-json", "--include-partial-messages", "--verbose");
     if (model) cmdArgs.push("--model", model);
     if (options?.allowAllPermissions) cmdArgs.push("--dangerously-skip-permissions");
+    if (options?.sessionId) cmdArgs.push("--session-id", options.sessionId);
     if (options?.extraFlags?.length) cmdArgs.push(...options.extraFlags);
     return cmdArgs;
   },
@@ -361,6 +363,9 @@ Options:
   --allow-all         Auto-approve all tool permissions (default: on)
   --no-allow-all      Require interactive permission prompts
   --last-activity-timeout DURATION  Kill and restart iteration after inactivity (e.g., 30m, 1h, 300s)
+  --persist-session   Reuse the same Claude Code session across all iterations
+                      (claude-code agent only; not compatible with --rotation across agents).
+                      Trade-off: context grows each iteration; cost increases over the loop.
   --config PATH       Use custom agent config file
   --init-config [PATH]  Write default agent config to PATH
   --version, -v       Show version
@@ -882,6 +887,8 @@ let verboseTools = false;
 let promptSource = "";
 let handleQuestions = true;
 let lastActivityTimeoutMs = 0; // 0 = disabled
+let persistSession = false;
+let claudeSessionId = "";
 
 const promptParts: string[] = [];
 let extraAgentFlags: string[] = [];
@@ -1027,6 +1034,8 @@ for (let i = 0; i < args.length; i++) {
     const amount = parseInt(match[1]);
     const unit = match[2];
     lastActivityTimeoutMs = amount * (unit === "h" ? 3600000 : unit === "m" ? 60000 : 1000);
+  } else if (arg === "--persist-session") {
+    persistSession = true;
   } else if (arg.startsWith("-")) {
     console.error(`Error: Unknown option: ${arg}`);
     console.error("Run 'ralph --help' for available options");
@@ -1041,6 +1050,26 @@ if (rotationInput) {
 } else if (!AGENTS[agentType]) {
   console.error(`Error: --agent requires one of: ${Object.keys(AGENTS).join(", ")}`);
   process.exit(1);
+}
+
+if (persistSession) {
+  const rotationHasClaude = rotation?.some(entry => entry.startsWith("claude-code:")) ?? false;
+  const claudeInPlay = agentType === "claude-code" || rotationHasClaude;
+  if (!claudeInPlay) {
+    console.warn(`⚠️  --persist-session is only supported with --agent claude-code; ignoring for agent '${agentType}'.`);
+  } else {
+    if (rotation) {
+      const nonClaudeEntries = rotation.filter(entry => !entry.startsWith("claude-code:"));
+      if (nonClaudeEntries.length > 0) {
+        console.warn(
+          `⚠️  --persist-session with --rotation: session continuity is only applied to claude-code entries. ` +
+          `Non-claude-code rotation steps (${nonClaudeEntries.join(", ")}) will not share the session.`,
+        );
+      }
+    }
+    claudeSessionId = randomUUID();
+    console.log(`🔗 Persisting Claude Code session: ${claudeSessionId}`);
+  }
 }
 
 function readPromptFile(path: string): string {
@@ -2099,6 +2128,7 @@ async function runRalphLoop(): Promise<void> {
         allowAllPermissions,
         extraFlags: extraAgentFlags,
         streamOutput,
+        sessionId: persistSession && currentAgent === "claude-code" ? claudeSessionId : undefined,
       });
 
       const env = agentConfig.buildEnv({

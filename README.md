@@ -222,6 +222,7 @@ Options:
   --no-commit              Don't auto-commit after iterations
   --allow-all              Auto-approve all tool permissions (default: on)
   --no-allow-all           Require interactive permission prompts
+  --persist-session        Reuse the same Claude Code session across iterations (claude-code only)
   --config PATH            Use custom agent config file
   --init-config [PATH]     Write default agent config to PATH and exit
   --help                   Show help
